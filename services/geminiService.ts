@@ -1,38 +1,60 @@
-
-import { GoogleGenAI, Type, Modality, GenerateContentResponse } from "@google/genai";
+import {
+  GoogleGenAI,
+  Type,
+  Modality,
+  GenerateContentResponse,
+} from "@google/genai";
 import { Scene, StoryConfig, ViralIdea, ContentFormat } from "../types";
-import { ART_STYLES, ASPECT_RATIO_SHORT, ASPECT_RATIO_LONG } from "../constants";
-import { base64ToUint8Array, addWavHeader, arrayBufferToBase64 } from "../utils/audioUtils";
+import {
+  ART_STYLES,
+  ASPECT_RATIO_SHORT,
+  ASPECT_RATIO_LONG,
+} from "../constants";
+import {
+  base64ToUint8Array,
+  addWavHeader,
+  arrayBufferToBase64,
+} from "../utils/audioUtils";
 
 const getAI = () => new GoogleGenAI({ apiKey: process.env.API_KEY });
 
 const cleanJsonResponse = (text: string): string => {
-  return text.replace(/```json/g, "").replace(/```/g, "").trim();
+  return text
+    .replace(/```json/g, "")
+    .replace(/```/g, "")
+    .trim();
 };
 
 /**
  * Robust retry utility to handle transient API errors (500, 503, XHR failures).
  */
-async function withRetry<T>(fn: () => Promise<T>, retries = 3, delay = 2000): Promise<T> {
+async function withRetry<T>(
+  fn: () => Promise<T>,
+  retries = 3,
+  delay = 2000
+): Promise<T> {
   try {
     return await fn();
   } catch (error: any) {
     const msg = error.message || JSON.stringify(error);
-    const isRetryable = 
-        msg.includes("500") || 
-        msg.includes("503") || 
-        msg.includes("Internal error") || 
-        msg.includes("Rpc failed") || 
-        msg.includes("xhr error") ||
-        msg.includes("network error") ||
-        msg.includes("fetch failed") ||
-        error.status === 500 || 
-        error.status === 503 ||
-        error.status === 429;
+    const isRetryable =
+      msg.includes("500") ||
+      msg.includes("503") ||
+      msg.includes("Internal error") ||
+      msg.includes("Rpc failed") ||
+      msg.includes("xhr error") ||
+      msg.includes("network error") ||
+      msg.includes("fetch failed") ||
+      error.status === 500 ||
+      error.status === 503 ||
+      error.status === 429;
 
     if (retries > 0 && isRetryable) {
-      console.warn(`Gemini API error (retryable), retrying in ${delay}ms...`, msg);
-      await new Promise(res => setTimeout(res, delay));
+      console.warn(
+        `Gemini API error (retryable), retrying in ${delay}ms...`,
+        msg
+      );
+      await new Promise((res) => setTimeout(res, delay));
       return withRetry(fn, retries - 1, delay * 2);
     }
     throw error;
@@ -41,12 +63,12 @@ async function withRetry<T>(fn: () => Promise<T>, retries = 3, delay = 2000): Pr
 
 // --- STAGE 1: Generate Viral Ideas ---
 export const generateViralIdeas = async (
-  format: string, 
-  duration: string, 
+  format: string,
+  duration: string,
   referenceScript?: string
-): Promise<{ ideas: ViralIdea[], tokens: number }> => {
+): Promise<{ ideas: ViralIdea[]; tokens: number }> => {
   const ai = getAI();
-  
+
   let promptContext = "";
   if (referenceScript && referenceScript.trim().length > 10) {
     promptContext = `
@@ -78,44 +100,53 @@ export const generateViralIdeas = async (
           properties: {
             title: { type: Type.STRING },
             hook: { type: Type.STRING },
-            viralFactor: { type: Type.STRING }
+            viralFactor: { type: Type.STRING },
           },
-          required: ["title", "hook", "viralFactor"]
-        }
-      }
+          required: ["title", "hook", "viralFactor"],
+        },
+      },
     },
-    required: ["ideas"]
+    required: ["ideas"],
   };
 
   try {
     const response = await withRetry(async () => {
       return await ai.models.generateContent({
-        model: 'gemini-3-pro-preview',
+        model: "gemini-3-flash-preview",
         contents: prompt,
-        config: { responseMimeType: "application/json", responseSchema: schema }
+        config: {
+          responseMimeType: "application/json",
+          responseSchema: schema,
+        },
       });
     });
 
     const data = JSON.parse(response.text || "{}");
-    const totalTokens = (response.usageMetadata?.promptTokenCount || 0) + (response.usageMetadata?.candidatesTokenCount || 0);
+    const totalTokens =
+      (response.usageMetadata?.promptTokenCount || 0) +
+      (response.usageMetadata?.candidatesTokenCount || 0);
     return { ideas: data.ideas || [], tokens: totalTokens };
   } catch (error) {
     console.error("Idea Generation Error:", error);
-    throw new Error("The Engine is currently overwhelmed. Please try again in a moment.");
+    throw new Error(
+      "The Engine is currently overwhelmed. Please try again in a moment."
+    );
   }
 };
 
 // --- STAGE 2: Generate Narrative Script ---
-export const generateScriptFromIdea = async (config: StoryConfig): Promise<{ script: string, tokens: number }> => {
+export const generateScriptFromIdea = async (
+  config: StoryConfig
+): Promise<{ script: string; tokens: number }> => {
   const ai = getAI();
   if (!config.selectedIdea) throw new Error("No idea selected");
 
-  const characterInstruction = config.characterDescription 
+  const characterInstruction = config.characterDescription
     ? `IMPORTANT: The main protagonist MUST match this physical description: ${config.characterDescription}. Ensure their gender, age, and features described here are reflected in their actions and dialogue throughout the script.`
     : "";
 
   let prompt = "";
-  
+
   if (config.referenceScript && config.referenceScript.trim().length > 10) {
     prompt = `
       Using the reference horror story transcript I provided below as the storytelling style, tone,
@@ -171,18 +202,25 @@ export const generateScriptFromIdea = async (config: StoryConfig): Promise<{ scr
   try {
     const response = await withRetry(async () => {
       return await ai.models.generateContent({
-        model: 'gemini-3-pro-preview',
+        model: "gemini-3-flash-preview",
         contents: prompt,
         config: {
           systemInstruction: `You are a master horror storyteller. You specialize in 3rd-person atmospheric narration. ${characterInstruction} You never use overused names like Elias.`,
-        }
+        },
       });
     });
-    const totalTokens = (response.usageMetadata?.promptTokenCount || 0) + (response.usageMetadata?.candidatesTokenCount || 0);
-    return { script: response.text || "Failed to generate script.", tokens: totalTokens };
+    const totalTokens =
+      (response.usageMetadata?.promptTokenCount || 0) +
+      (response.usageMetadata?.candidatesTokenCount || 0);
+    return {
+      script: response.text || "Failed to generate script.",
+      tokens: totalTokens,
+    };
   } catch (error) {
     console.error("Script Generation Error:", error);
-    throw new Error("Failed to conjure the script. The dark forces are restless. Try again.");
+    throw new Error(
+      "Failed to conjure the script. The dark forces are restless. Try again."
+    );
   }
 };
 
@@ -194,9 +232,15 @@ export const generatePromptsFromScript = async (
   characterDescription: string,
   artStyleId: string,
   format: ContentFormat
-): Promise<{ scenes: Scene[], nextSceneNumber: number, finished: boolean, tokens: number }> => {
+): Promise<{
+  scenes: Scene[];
+  nextSceneNumber: number;
+  finished: boolean;
+  tokens: number;
+}> => {
   const ai = getAI();
-  const selectedStyle = ART_STYLES.find(s => s.id === artStyleId) || ART_STYLES[0];
+  const selectedStyle =
+    ART_STYLES.find((s) => s.id === artStyleId) || ART_STYLES[0];
 
   const prompt = `
     Analyze this horror narrative and break it into visual scenes. 
@@ -226,20 +270,28 @@ export const generatePromptsFromScript = async (
             script: { type: Type.STRING },
             editingTips: { type: Type.STRING },
           },
-          required: ["sceneNumber", "visualDescription", "script", "editingTips"]
-        }
+          required: [
+            "sceneNumber",
+            "visualDescription",
+            "script",
+            "editingTips",
+          ],
+        },
       },
-      hasMoreScenes: { type: Type.BOOLEAN }
+      hasMoreScenes: { type: Type.BOOLEAN },
     },
-    required: ["scenes", "hasMoreScenes"]
+    required: ["scenes", "hasMoreScenes"],
   };
 
   try {
     const response = await withRetry(async () => {
       return await ai.models.generateContent({
-        model: 'gemini-3-flash-preview',
+        model: "gemini-3-flash-preview",
         contents: prompt,
-        config: { responseMimeType: "application/json", responseSchema: schema }
+        config: {
+          responseMimeType: "application/json",
+          responseSchema: schema,
+        },
       });
     });
 
@@ -251,61 +303,71 @@ export const generatePromptsFromScript = async (
       fullPrompt: `${selectedStyle.prompt}.\n\n${s.visualDescription}`,
       script: s.script || "(Silence)",
       editingTips: s.editingTips || "",
-      duration: 6 // Set default to middle of 4-8 range
+      duration: 6, // Set default to middle of 4-8 range
     }));
 
-    const totalTokens = (response.usageMetadata?.promptTokenCount || 0) + (response.usageMetadata?.candidatesTokenCount || 0);
+    const totalTokens =
+      (response.usageMetadata?.promptTokenCount || 0) +
+      (response.usageMetadata?.candidatesTokenCount || 0);
 
     return {
       scenes: generatedScenes,
       nextSceneNumber: startSceneNumber + generatedScenes.length,
       finished: !data.hasMoreScenes,
-      tokens: totalTokens
+      tokens: totalTokens,
     };
   } catch (error) {
     console.error("Storyboard Error:", error);
-    throw new Error("Visualizing the nightmare failed. Please try the next batch again.");
+    throw new Error(
+      "Visualizing the nightmare failed. Please try the next batch again."
+    );
   }
 };
 
 // --- IMAGE GENERATION ---
 export const generateSceneImage = async (
-  prompt: string, 
+  prompt: string,
   aspectRatio: "1:1" | "9:16" | "16:9" = "1:1",
   referenceImage?: string // Base64 data if available
 ): Promise<string> => {
   const ai = getAI();
   try {
     const response = await withRetry(async () => {
-        const contents: any = { parts: [] };
-        
-        // If a reference image is provided, send it as the first part for character consistency
-        if (referenceImage) {
-          // Extract actual base64 data if it contains the data:image prefix
-          const base64Data = referenceImage.includes(',') ? referenceImage.split(',')[1] : referenceImage;
-          contents.parts.push({
-            inlineData: {
-              data: base64Data,
-              mimeType: 'image/png' // Assuming PNG for simplicity
-            }
-          });
-          // Update prompt to instruct the model to use the reference image
-          contents.parts.push({ text: `Based on the character in the image provided, generate the following scene: ${prompt}` });
-        } else {
-          contents.parts.push({ text: prompt });
-        }
+      const contents: any = { parts: [] };
 
-        return await ai.models.generateContent({
-            model: 'gemini-2.5-flash-image', 
-            contents: contents,
-            config: {
-              imageConfig: {
-                aspectRatio: aspectRatio
-              }
-            }
+      // If a reference image is provided, send it as the first part for character consistency
+      if (referenceImage) {
+        // Extract actual base64 data if it contains the data:image prefix
+        const base64Data = referenceImage.includes(",")
+          ? referenceImage.split(",")[1]
+          : referenceImage;
+        contents.parts.push({
+          inlineData: {
+            data: base64Data,
+            mimeType: "image/png", // Assuming PNG for simplicity
+          },
         });
+        // Update prompt to instruct the model to use the reference image
+        contents.parts.push({
+          text: `Based on the character in the image provided, generate the following scene: ${prompt}`,
+        });
+      } else {
+        contents.parts.push({ text: prompt });
+      }
+
+      return await ai.models.generateContent({
+        model: "gemini-2.5-flash-image",
+        contents: contents,
+        config: {
+          imageConfig: {
+            aspectRatio: aspectRatio,
+          },
+        },
+      });
     });
-    const part = response.candidates?.[0]?.content?.parts.find(p => p.inlineData);
+    const part = response.candidates?.[0]?.content?.parts.find(
+      (p) => p.inlineData
+    );
     if (!part?.inlineData) throw new Error("No image data");
     return `data:image/png;base64,${part.inlineData.data}`;
   } catch (error) {
@@ -315,20 +377,26 @@ export const generateSceneImage = async (
 };
 
 // --- AUDIO GENERATION ---
-export const generateNarration = async (text: string, voiceName: string = 'Charon'): Promise<string> => {
+export const generateNarration = async (
+  text: string,
+  voiceName: string = "Charon"
+): Promise<string> => {
   const ai = getAI();
   try {
     const response = await withRetry(async () => {
-        return await ai.models.generateContent({
-            model: 'gemini-2.5-flash-preview-tts',
-            contents: { parts: [{ text }] },
-            config: {
-                responseModalities: [Modality.AUDIO],
-                speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: voiceName } } }
-            }
-        });
+      return await ai.models.generateContent({
+        model: "gemini-2.5-flash-preview-tts",
+        contents: { parts: [{ text }] },
+        config: {
+          responseModalities: [Modality.AUDIO],
+          speechConfig: {
+            voiceConfig: { prebuiltVoiceConfig: { voiceName: voiceName } },
+          },
+        },
+      });
     });
-    const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+    const base64Audio =
+      response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
     if (!base64Audio) throw new Error("No audio data");
     const pcmBytes = base64ToUint8Array(base64Audio);
     const wavBuffer = addWavHeader(pcmBytes, 24000, 1);
